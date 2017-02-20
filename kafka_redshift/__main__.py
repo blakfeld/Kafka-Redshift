@@ -2,9 +2,9 @@
 Utility to copy data from a Kafka topic to a Redshift database.
 
 Usage:
-    kafka-redshift [OPTIONS]
+    kafka-redshift [options]
 
-OPTIONS:
+Options:
     --config-file=<PATH>        Path to a config file.
     --kafka-topic=<TOPIC>       Kafka topic to consume.
     --kafka-hosts=<SERVERS>     Comma separated list of Kafka nodes.
@@ -13,7 +13,9 @@ OPTIONS:
     --redshift-user=<USER>      User to connect to Redshift as.
     --redshift-pass=<PASS>      Password to use when connecting to Redshift.
     --redshift-port=<PORT>      Port to connect to Redshift with.
-    --avro-schema=<PATH>        Path to Avro Schema file.
+    --avro-protocol=<PATH>      Path to Avro Protocol file.
+    --schema-name=<NAME>        Schema name to use from the protocol
+    --s3-bucket=<BUCKET>        S3 Bucket to store data in.
     -v --verbose                Toggle verbose mode.
     -h --help                   Display this message.
 """
@@ -30,6 +32,85 @@ from docopt import docopt
 import defaults
 import errors
 from kafka_redshift import KafkaRedshift
+
+
+class Config(object):
+    """
+    Class to help reconcile multiple potential configuration sources.
+    """
+
+    def __init__(self, config_fpath, cli_args, defaults):
+        """
+        Constructor.
+
+        Args:
+            config_fpath (str):     Path to config file.
+            cli_args (dict):        DocOpt generated args.
+            defaults (obj):         Defaults obj.
+        """
+        self.config = self.read_config_file(config_fpath)
+        self.cli_args = cli_args
+        self.defaults = defaults
+
+    def get(self, key):
+        """
+        Take a CLI argument, and attempt to resolve it using the
+            following order:
+
+        1. CLI Args
+        2. Config File
+        3. Defaults
+
+        Args:
+            cli_key (str):      The CLI arg to resolve.
+        """
+        # DocOpt populates all expected keys with Nonetypes, so
+        #   we have to test for existence of value, not key.
+        value = self.cli_args.get(key)
+        if value:
+            return value
+
+        # If we didn't find what we wanted in args, munge the key to be
+        #   like something we'd expect in our config file.
+        key = key.replace('--', '').replace('-', '_')
+        try:
+            return self.config[key]
+        except KeyError:
+            pass
+
+        # if we still don't have anything, shift to uppercase and check
+        #   inside defaults.
+        try:
+            return getattr(defaults, key.upper())
+        except AttributeError:
+            raise errors.BadConfigException(
+                'Unable to find value for key: {0}'.format(key))
+
+    @staticmethod
+    def read_config_file(config_fpath):
+        """
+        Reads a provided config file and returns the contents.
+
+        Args:
+            config_file (str):      Path of the config file to read.
+
+        Returns:
+            dict
+
+        Raises:
+            BadConfigException if PyYaml is unable to parse the file.
+        """
+        with open(config_fpath, 'r') as config_handle:
+            config_data = config_handle.read()
+
+        try:
+            config_data = yaml.load(config_data)
+        except yaml.YAMLError as e:
+            raise errors.BadConfigException(
+                'Unable to parse config file located at "{0}"! Error: {1}'
+                .format(config_fpath, e))
+
+        return config_data
 
 
 def find_config_file(config_search_paths):
@@ -54,63 +135,6 @@ def find_config_file(config_search_paths):
     raise errors.BadConfigException(
         'Unable to find a config file in the following search path: {0}'
         .format(config_search_paths))
-
-
-def read_config_file(config_file):
-    """
-    Reads a provided config file and returns the contents.
-
-    Args:
-        config_file (str):      Path of the config file to read.
-
-    Returns:
-        dict
-
-    Raises:
-        BadConfigException if PyYaml is unable to parse the file.
-    """
-    with open(config_file, 'r') as config_handle:
-        config_data = config_handle.read()
-
-    try:
-        config_data = yaml.load(config_data)
-    except yaml.YAMLError as e:
-        raise errors.BadConfigException(
-            'Unable to parse config file located at "{0}"! Error: {1}'
-            .format(config_file, e))
-
-    return config_data
-
-
-def get_config_key(args, config, key):
-    """
-    Given a config dict, search for a key. If that key does not exist
-        return that value from our defaults module.
-
-    Args:
-        args (dict):        DocOpt generaetd dict.
-        config (dict):      Dict containing config information.
-        key (str):          Key to search for in the dict.
-
-    Returns:
-        Desired value wither from config or defaults.py.
-    """
-    if key in args:
-        return args[key]
-
-    # If we didn't find what we wanted in args, munge the key to be
-    #   like something we'd expect in our config file.
-    key = key.replace('--', '').replace('-', '_')
-    if key in config:
-        return config[key]
-
-    # if we still don't have anything, shift to uppercase and check
-    #   inside defaults.
-    try:
-        return getattr(defaults, key.upper())
-    except AttributeError:
-        raise errors.BadConfigException(
-            'Unable to find value for key: {0}'.format(key))
 
 
 def get_credentials(username=None, password=None):
@@ -157,30 +181,34 @@ def main():
 
     logging.debug('Searching for config file...')
     config_file = args.get('--config-file') or find_config_file(defaults.CONFIG_SEARCH_PATHS)
-    config = read_config_file(config_file)
+    config = Config(config_file, args, defaults)
     logging.debug('Config file at path "%s" successfully loaded!', config_file)
 
-    kafka_hosts = get_config_key(args, config, '--kafka-hosts')
+    kafka_hosts = config.get('--kafka-hosts')
     if isinstance(kafka_hosts, str):
         kafka_hosts = kafka_hosts.split(',')
 
-    kafka_topic = get_config_key(args, config, '--kafka-topic')
-    rs_host = get_config_key(args, config, '--redshift-host')
-    rs_dbname = get_config_key(args, config, '--redshift-dbname')
-    rs_port = get_config_key(args, config, '--redshift-port')
-    rs_username, rs_password = get_credentials(username=args.get('--username'),
-                                               password=args.get('--password'))
-    schema_path = get_config_key(args, config, '--avro-schema')
+    kafka_topic = config.get('--kafka-topic')
+    rs_host = config.get('--redshift-host')
+    rs_dbname = config.get('--redshift-dbname')
+    rs_port = config.get('--redshift-port')
+    rs_username, rs_password = get_credentials(username=args.get('--redshift-user'),
+                                               password=args.get('--redshift-pass'))
+    protocol_path = os.path.expanduser(config.get('--avro-protocol'))
+    schema_name = config.get('--schema-name')
+    s3_bucket = config.get('--s3-bucket')
 
     kafka_redshift = KafkaRedshift(
         kafka_topic=kafka_topic,
         kafka_hosts=kafka_hosts,
-        avro_schema_path=schema_path,
+        avro_protocol_path=protocol_path,
+        schema_name=schema_name,
+        s3_bucket=s3_bucket,
         redshift_host=rs_host,
         redshift_dbname=rs_dbname,
         redshift_user=rs_username,
         redshift_pass=rs_password,
-        refshift_port=int(rs_port),
+        redshift_port=rs_port,
     )
 
     kafka_redshift.run()

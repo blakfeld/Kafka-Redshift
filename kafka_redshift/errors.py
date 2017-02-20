@@ -27,3 +27,18 @@ class AuthenticationException(KafkaRedshiftException):
     Exception to raise if we have issues authenticating.
     """
     pass
+
+
+class MissingAvroToolsException(KafkaRedshiftException):
+    """
+    Exception to raise if the avro tools package is missing.
+    """
+    pass
+
+
+class UnableToParseAvroException(KafkaRedshiftException):
+    """
+    Exception to raise if we can't parse the provided avro
+        schema/protocol.
+    """
+    pass
