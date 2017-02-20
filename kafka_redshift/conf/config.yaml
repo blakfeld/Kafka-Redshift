@@ -1,0 +1,8 @@
+---
+kafka_topic: myTopic
+kafka_hosts:
+  - 'localhost:9092'
+redshift_host: redshift.test.com
+redshift_dbname: my_redshift_db
+redshift_user: corwinBrown
+redshift_port: 5439
